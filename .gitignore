@@ -1,0 +1,15 @@
+# Build intermediates
+*.o
+*.obj
+
+# Test / run artifacts
+test/test.log
+test/gui.png
+*.vhd
+
+# Editor / OS
+.vs/
+.vscode/
+*.user
+Thumbs.db
+desktop.ini
