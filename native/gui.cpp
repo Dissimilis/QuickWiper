@@ -334,6 +334,28 @@ LRESULT CALLBACK MainProc(HWND h, UINT m, WPARAM w, LPARAM l) {
                 L"beyond any software's reach.",
                 WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, h, nullptr, hi, nullptr);
 
+            // Tooltips explaining the two modes (hover over the radio buttons).
+            HWND hTip = CreateWindowExW(WS_EX_TOPMOST, TOOLTIPS_CLASSW, nullptr,
+                WS_POPUP | TTS_NOPREFIX | TTS_ALWAYSTIP, 0, 0, 0, 0, h, nullptr, hi, nullptr);
+            SendMessageW(hTip, TTM_SETMAXTIPWIDTH, 0, (LPARAM)S(340));
+            SendMessageW(hTip, TTM_SETDELAYTIME, TTDT_AUTOPOP, (LPARAM)MAKELONG(20000, 0));
+            auto addTip = [&](HWND ctrl, const wchar_t* text) {
+                TTTOOLINFOW ti{}; ti.cbSize = sizeof(ti);
+                ti.uFlags = TTF_IDISHWND | TTF_SUBCLASS;
+                ti.hwnd = h; ti.uId = (UINT_PTR)ctrl; ti.lpszText = (LPWSTR)text;
+                SendMessageW(hTip, TTM_ADDTOOLW, 0, (LPARAM)&ti);
+            };
+            addTip(hFull,
+                L"Full: writes random data over the entire device, from the first sector "
+                L"to the last. Most thorough; takes as long as it takes to write the whole "
+                L"device once.");
+            addTip(hQuick,
+                L"Quick: a progressive wipe you can cancel at any time. It works in order of "
+                L"impact - first it destroys the filesystem map (the index of what is where), "
+                L"then overwrites file headers across the whole device, then fills the rest with "
+                L"random data. Stop after a few seconds for a fast, partial wipe, or let it run "
+                L"to completion for the same result as Full.");
+
             SetFontAll(h);
             RefreshList();
             return 0;
@@ -397,7 +419,8 @@ LRESULT CALLBACK MainProc(HWND h, UINT m, WPARAM w, LPARAM l) {
 } // namespace
 
 int RunGui(HINSTANCE hInst) {
-    INITCOMMONCONTROLSEX icc{ sizeof(icc), ICC_LISTVIEW_CLASSES | ICC_PROGRESS_CLASS | ICC_STANDARD_CLASSES };
+    INITCOMMONCONTROLSEX icc{ sizeof(icc),
+        ICC_LISTVIEW_CLASSES | ICC_PROGRESS_CLASS | ICC_STANDARD_CLASSES | ICC_TAB_CLASSES };
     InitCommonControlsEx(&icc);
     InitializeCriticalSection(&g_cs);
 
