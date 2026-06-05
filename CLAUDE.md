@@ -15,7 +15,7 @@ When in doubt, choose less. Complexity must justify itself; simplicity never has
 
 ## Status
 
-Implemented and tested. The original design lives in **[plan.md](plan.md)**; this file is the working orientation.
+Implemented and tested. This file is the working orientation.
 
 **The shipped deliverable is the native C++/Win32 build** (`native/`) → `dist/QuickWiper.exe`, ~0.36 MB, fully self-contained (UCRT is in-box on Win10/11). It was rewritten from C# specifically to shrink the exe ~137× (the .NET/WinForms self-contained build was 49 MB and can't be trimmed/AOT'd).
 
@@ -62,7 +62,7 @@ Notes for working here:
 
 ## Non-negotiable: never wipe the OS / a fixed disk
 
-The central risk is wiping the **wrong disk**. The OS/system disk and any non-removable disk must be unselectable through both GUI and CLI, with no `--force` override. Guards are layered and **fail closed** (if a disk's bus type or the system-disk number can't be resolved, the disk is rejected). See plan.md §3. The safety logic (`Evaluate` / `GetProtectedDiskNumbers` in `core.cpp`, mirrored by `SystemDiskGuard` in the C# version) is the most important thing to keep correct and well-tested.
+The central risk is wiping the **wrong disk**. The OS/system disk and any non-removable disk must be unselectable through both GUI and CLI, with no `--force` override. Guards are layered and **fail closed** (if a disk's bus type or the system-disk number can't be resolved, the disk is rejected). The safety logic (`Evaluate` / `GetProtectedDiskNumbers` in `core.cpp`, mirrored by `SystemDiskGuard` in the C# version) is the most important thing to keep correct and well-tested.
 
 ## Honest limits
 
