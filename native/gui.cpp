@@ -428,7 +428,7 @@ LRESULT CALLBACK MainProc(HWND h, UINT m, WPARAM w, LPARAM l) {
             SendMessageW(hProgress, PBM_SETPOS, (WPARAM)(p.fraction() * 1000), 0);
             int es = (int)(p.etaSeconds + 0.5);
             wchar_t b[160];
-            std::swprintf(b, 160, L"%s - %.1f%%   ETA %02d:%02d:%02d",
+            std::swprintf(b, 160, L"%ls - %.1f%%   ETA %02d:%02d:%02d",
                 WideOf(p.pass).c_str(), p.fraction() * 100.0, es / 3600, (es / 60) % 60, es % 60);
             SetWindowTextW(hStatus, b);
             wchar_t s[320];
