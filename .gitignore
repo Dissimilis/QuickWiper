@@ -13,3 +13,6 @@ test/gui.png
 *.user
 Thumbs.db
 desktop.ini
+
+# Released binary - force-track despite the global *.exe ignore rule
+!release/QuickWiper.exe
