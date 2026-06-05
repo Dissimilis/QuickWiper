@@ -71,9 +71,13 @@ std::string DiskInfo::lettersDisplay() const {
 GuardResult Evaluate(const DiskInfo& d, const std::set<int>& protectedDisks, bool allowVirtual) {
     if (d.queryFailed) return { false, "device could not be queried (rejected, fail-closed)" };
     if (protectedDisks.count(d.index)) return { false, "system / boot / pagefile disk - permanently protected" };
-    if (d.busType == BusTypeUsb && d.removable) return { true, "removable USB device" };
+    // Any USB-attached disk is wipeable, regardless of the RemovableMedia flag:
+    // external SSDs / NVMe-in-USB-enclosures report bus=Usb but removable=no, and
+    // the user expects to be able to wipe those. Internal SATA/NVMe disks stay
+    // blocked (and the system/boot/pagefile disk is already blocked above).
+    if (d.busType == BusTypeUsb) return { true, d.removable ? "removable USB device" : "USB device" };
     if (allowVirtual && d.busType == BusTypeFileBackedVirtual) return { true, "file-backed virtual disk (test mode)" };
-    std::string r = "not a removable USB device (bus: ";
+    std::string r = "not a USB-attached device (bus: ";
     r += BusName(d.busType); r += d.removable ? ", removable: yes)" : ", removable: no)";
     return { false, r };
 }

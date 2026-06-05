@@ -4,9 +4,10 @@
 #include <cstdio>
 #include <atomic>
 
-// Headless front-end. Honors every guard: system/fixed disks can never be wiped,
-// and no flag overrides that. --allow-virtual only relaxes the removable-USB rule
-// for file-backed VHDs (testing).
+// Headless front-end. Honors every guard: the system/boot/pagefile disk can never
+// be wiped, and no flag overrides that. Only USB-attached disks are wipeable;
+// internal SATA/NVMe disks are blocked. --allow-virtual only relaxes the USB-bus
+// rule for file-backed VHDs (testing).
 
 using namespace qw;
 
@@ -44,8 +45,9 @@ int Usage() {
 "  QuickWiper wipe --disk N --mode full|quick [--seconds S] [--fs exfat|ntfs] --yes [--allow-virtual]\r\n"
 "  QuickWiper format --disk N --fs exfat|ntfs --yes [--allow-virtual]\r\n\r\n"
 "Safety:\r\n"
-"  The system/boot/pagefile disk and any non-removable disk can NEVER be wiped.\r\n"
-"  --allow-virtual only relaxes the removable-USB rule for file-backed VHDs (testing).\r\n\r\n"
+"  The system/boot/pagefile disk can NEVER be wiped. Only USB-attached disks are wipeable;\r\n"
+"  internal SATA/NVMe disks are blocked.\r\n"
+"  --allow-virtual only relaxes the USB-bus rule for file-backed VHDs (testing).\r\n\r\n"
 "Exit codes: 0 ok, 1 usage, 2 guard-rejected, 3 not-found, 4 lock-failed, 5 write-error, 6 cancelled.\r\n");
     return OK;
 }

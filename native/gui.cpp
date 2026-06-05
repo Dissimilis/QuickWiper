@@ -305,7 +305,7 @@ LRESULT CALLBACK MainProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         case WM_CREATE: {
             HINSTANCE hi = ((CREATESTRUCT*)l)->hInstance;
             hHeader = CreateWindowExW(0, L"STATIC",
-                L"Select a removable USB device to wipe.\nThe system disk and fixed disks cannot be selected.",
+                L"Select a USB device to wipe.\nThe system disk and internal SATA/NVMe disks cannot be selected.",
                 WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, h, nullptr, hi, nullptr);
             hRefresh = CreateWindowExW(0, L"BUTTON", L"Refresh", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
                 0, 0, 0, 0, h, (HMENU)ID_REFRESH, hi, nullptr);

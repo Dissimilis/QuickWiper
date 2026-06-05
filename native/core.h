@@ -34,7 +34,7 @@ struct GuardResult {
     std::string reason;
 };
 
-// The single decision point: provably-removable-USB only (or, in test mode, a
+// The single decision point: USB-attached disks only (or, in test mode, a
 // file-backed VHD), and never a protected/system disk. Fail-closed.
 GuardResult Evaluate(const DiskInfo& d, const std::set<int>& protectedDisks, bool allowVirtual);
 
