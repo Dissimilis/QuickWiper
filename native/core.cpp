@@ -3,6 +3,7 @@
 #include <cstdio>
 #include <cstring>
 #include <chrono>
+#include <deque>
 
 #pragma comment(lib, "bcrypt.lib")
 
@@ -275,28 +276,96 @@ std::vector<WriteOp> Plan(long long total, Mode mode) {
 
 // ---- wipe engine ----------------------------------------------------------
 
-static HANDLE OpenForWrite(const DiskInfo& disk, std::vector<HANDLE>& locks, std::string& err) {
-    for (wchar_t letter : disk.letters) {
-        wchar_t path[16]; std::swprintf(path, 16, L"\\\\.\\%c:", letter);
-        HANDLE vol = CreateFileW(path, GENERIC_READ | GENERIC_WRITE,
+// Force every volume on the disk out of the way so the raw writes below are not
+// blocked by a still-mounted filesystem. We dismount even volumes Windows holds
+// open itself (e.g. an EFI/ESP partition that FSCTL_LOCK_VOLUME can never lock):
+// a forced FSCTL_DISMOUNT_VOLUME succeeds with or without a lock. We only ever
+// touch volumes we've confirmed live on the target disk, and keep each handle
+// open (in `locks`) for the duration of the wipe so nothing can remount.
+static void DismountVolumesOnDisk(int diskIndex, std::vector<HANDLE>& locks) {
+    wchar_t name[MAX_PATH];
+    HANDLE find = FindFirstVolumeW(name, MAX_PATH);
+    if (find == INVALID_HANDLE_VALUE) return;
+    do {
+        std::wstring path(name);
+        if (!path.empty() && path.back() == L'\\') path.pop_back(); // CreateFile wants no trailing '\'
+        HANDLE vol = CreateFileW(path.c_str(), GENERIC_READ | GENERIC_WRITE,
                                  FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, 0, nullptr);
-        if (vol == INVALID_HANDLE_VALUE) { err = "Could not open a volume on the disk."; return INVALID_HANDLE_VALUE; }
-        locks.push_back(vol);
-        DWORD ret = 0;
-        if (!DeviceIoControl(vol, FSCTL_LOCK_VOLUME, nullptr, 0, nullptr, 0, &ret, nullptr)) {
-            char b[160]; std::snprintf(b, sizeof(b),
-                "Could not lock volume %c: - it is in use. Close programs using it and retry.", (char)letter);
-            err = b; return INVALID_HANDLE_VALUE;
+        if (vol == INVALID_HANDLE_VALUE) continue;
+
+        // Only act on volumes that actually sit on the target disk - never touch another disk.
+        VOLUME_DISK_EXTENTS ext{}; DWORD ret = 0; bool onDisk = false;
+        if (DeviceIoControl(vol, IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS, nullptr, 0,
+                            &ext, sizeof(ext), &ret, nullptr)) {
+            for (DWORD i = 0; i < ext.NumberOfDiskExtents; ++i)
+                if ((int)ext.Extents[i].DiskNumber == diskIndex) { onDisk = true; break; }
+        }
+        if (!onDisk) { CloseHandle(vol); continue; }
+
+        // Best-effort lock first (clears transient indexer/AV handles), then force a
+        // dismount regardless, then re-lock to hold the volume down until we finish.
+        for (int k = 0; k < 5; ++k) {
+            if (DeviceIoControl(vol, FSCTL_LOCK_VOLUME, nullptr, 0, nullptr, 0, &ret, nullptr)) break;
+            Sleep(300);
         }
         DeviceIoControl(vol, FSCTL_DISMOUNT_VOLUME, nullptr, 0, nullptr, 0, &ret, nullptr);
-    }
+        DeviceIoControl(vol, FSCTL_LOCK_VOLUME, nullptr, 0, nullptr, 0, &ret, nullptr);
+        locks.push_back(vol); // keep open for the whole wipe
+    } while (FindNextVolumeW(find, name, MAX_PATH));
+    FindVolumeClose(find);
+}
+
+static HANDLE OpenForWrite(const DiskInfo& disk, std::vector<HANDLE>& locks, std::string& err) {
+    // Take exclusive control of the disk ourselves rather than asking the user to
+    // close programs: dismount every volume on it, then drop the partition table.
+    DismountVolumesOnDisk(disk.index, locks);
+
     wchar_t path[64]; std::swprintf(path, 64, L"\\\\.\\PhysicalDrive%d", disk.index);
     HANDLE h = CreateFileW(path, GENERIC_READ | GENERIC_WRITE,
                            FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING,
                            FILE_FLAG_WRITE_THROUGH, nullptr);
-    if (h == INVALID_HANDLE_VALUE) err = "Could not open the physical drive for writing.";
+    if (h == INVALID_HANDLE_VALUE) { err = "Could not open the physical drive for writing."; return INVALID_HANDLE_VALUE; }
+
+    // Clear the partition table (the native equivalent of `diskpart clean`). This
+    // makes Windows let go of any partition it still has mounted - notably an EFI
+    // partition that can't be locked - so the whole-device writes below succeed.
+    DWORD ret = 0;
+    DeviceIoControl(h, IOCTL_DISK_DELETE_DRIVE_LAYOUT, nullptr, 0, nullptr, 0, &ret, nullptr);
+    DeviceIoControl(h, IOCTL_DISK_UPDATE_PROPERTIES, nullptr, 0, nullptr, 0, &ret, nullptr);
     return h;
 }
+
+// Rolling write-speed tracker. Fed (wall-clock seconds, cumulative bytes); reports
+// current (last ~1 s), 10 s / 60 s rolling averages, and the min/max of the per-second
+// rate after a short warm-up. Session average and ETA are computed by the caller.
+struct SpeedStats {
+    struct Sample { double t; long long bytes; };
+    std::deque<Sample> win;            // samples within ~the last 60 s (+1 older for the edge)
+    double minRate = 0, maxRate = 0;
+    bool haveMinMax = false;
+
+    void add(double t, long long bytes) {
+        win.push_back({ t, bytes });
+        while (win.size() > 2 && t - win[1].t > 60.0) win.pop_front();
+        if (t >= 2.0) {                // skip start-up transient
+            double r = rate(t, bytes, 1.0);
+            if (r > 0) {
+                if (!haveMinMax) { minRate = maxRate = r; haveMinMax = true; }
+                else { if (r < minRate) minRate = r; if (r > maxRate) maxRate = r; }
+            }
+        }
+    }
+
+    // MB/s over the last `window` seconds (or the whole history if it's shorter).
+    double rate(double tNow, long long bNow, double window) const {
+        if (win.size() < 2) return 0;
+        double tOld = win.front().t; long long bOld = win.front().bytes;
+        for (auto it = win.rbegin(); it != win.rend(); ++it)
+            if (tNow - it->t >= window) { tOld = it->t; bOld = it->bytes; break; }
+        double dt = tNow - tOld;
+        return dt > 0 ? ((bNow - bOld) / 1048576.0) / dt : 0;
+    }
+};
 
 Outcome RunWipe(const DiskInfo& disk, Mode mode, const ProgressFn& progress,
                 std::atomic<bool>& cancel, long long timeBoxMs, std::string& err) {
@@ -314,6 +383,7 @@ Outcome RunWipe(const DiskInfo& disk, Mode mode, const ProgressFn& progress,
     auto plan = Plan(disk.sizeBytes, mode);
     long long totalPlanned = 0; for (auto& op : plan) totalPlanned += op.length;
     long long writtenTotal = 0;
+    SpeedStats speed;
 
     Outcome result = Outcome::Completed;
     auto start = std::chrono::steady_clock::now();
@@ -337,10 +407,18 @@ Outcome RunWipe(const DiskInfo& disk, Mode mode, const ProgressFn& progress,
 
             pos += count; writtenTotal += count;
             if (progress) {
+                double now = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+                speed.add(now, writtenTotal);
                 Progress p;
                 p.pass = op.pass; p.written = writtenTotal; p.total = totalPlanned;
-                p.mbPerSec = elapsed > 0 ? (writtenTotal / 1048576.0) / elapsed : 0;
-                p.etaSeconds = p.mbPerSec > 0 ? ((totalPlanned - writtenTotal) / 1048576.0) / p.mbPerSec : 0;
+                p.curMbPerSec    = speed.rate(now, writtenTotal, 1.0);
+                p.avg10sMbPerSec = speed.rate(now, writtenTotal, 10.0);
+                p.avg60sMbPerSec = speed.rate(now, writtenTotal, 60.0);
+                p.avgMbPerSec    = now > 0 ? (writtenTotal / 1048576.0) / now : 0;
+                p.minMbPerSec    = speed.minRate;
+                p.maxMbPerSec    = speed.maxRate;
+                double etaRate = p.avgMbPerSec > 0 ? p.avgMbPerSec : p.curMbPerSec;
+                p.etaSeconds = etaRate > 0 ? ((totalPlanned - writtenTotal) / 1048576.0) / etaRate : 0;
                 progress(p);
             }
         }

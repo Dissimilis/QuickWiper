@@ -55,7 +55,12 @@ struct Progress {
     std::string pass;
     long long written = 0;
     long long total = 0;
-    double mbPerSec = 0;
+    double curMbPerSec = 0;     // instantaneous: rolling average over the last ~1 s
+    double avg10sMbPerSec = 0;  // rolling average over the last 10 s
+    double avg60sMbPerSec = 0;  // rolling average over the last 60 s
+    double avgMbPerSec = 0;     // session average: total bytes / total elapsed
+    double minMbPerSec = 0;     // slowest 1 s rate seen (after a brief warm-up)
+    double maxMbPerSec = 0;     // fastest 1 s rate seen
     double etaSeconds = 0;
     double fraction() const { return total <= 0 ? 0.0 : (double)written / (double)total; }
 };

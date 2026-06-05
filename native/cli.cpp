@@ -103,10 +103,12 @@ bool Resolve(int index, bool allowVirtual, DiskInfo& disk, GuardResult& guard, i
 }
 
 void PrintProgress(const Progress& p) {
-    char buf[160];
+    char buf[256];
     int es = (int)(p.etaSeconds + 0.5);
-    std::snprintf(buf, sizeof(buf), "\r  [%-22s] %5.1f%%  %6.1f MB/s  ETA %02d:%02d:%02d      ",
-        p.pass.c_str(), p.fraction() * 100.0, p.mbPerSec, es / 3600, (es / 60) % 60, es % 60);
+    std::snprintf(buf, sizeof(buf),
+        "\r  [%-18s] %5.1f%%  cur %6.1f 10s %6.1f 1m %6.1f avg %6.1f min %6.1f max %6.1f MB/s  ETA %02d:%02d:%02d   ",
+        p.pass.c_str(), p.fraction() * 100.0, p.curMbPerSec, p.avg10sMbPerSec, p.avg60sMbPerSec,
+        p.avgMbPerSec, p.minMbPerSec, p.maxMbPerSec, es / 3600, (es / 60) % 60, es % 60);
     Out(buf);
 }
 
@@ -124,6 +126,8 @@ int CmdWipe(const Options& o) {
     Out(std::string("Mode:   ") + (o.mode == Mode::Full ? "Full" : "Quick")
         + (o.seconds >= 0 ? "  (time box: " + std::to_string(o.seconds) + "s)" : "") + "\r\n");
     Out("ALL DATA ON THIS DEVICE WILL BE DESTROYED.\r\n");
+    if (!disk.letters.empty())
+        Out("Mounted volumes (" + disk.lettersDisplay() + ") will be dismounted automatically.\r\n");
     if (!o.yes) { Err("Refusing without --yes (CLI wipe needs explicit --yes)."); return USAGE; }
 
     std::atomic<bool> cancel(false);
@@ -140,14 +144,16 @@ int CmdWipe(const Options& o) {
         return lock ? LOCKFAIL : WRITEERR;
     }
     Out(std::string("Wipe ") + (outcome == Outcome::Completed ? "Completed" : outcome == Outcome::TimedOut ? "TimedOut" : "Cancelled") + ".\r\n");
-    if (outcome == Outcome::Cancelled) return CANCELLED;
 
+    // Reformat even after a cancel: the disk is already destroyed past the cancel
+    // point, so still hand back the formatted drive that was requested.
     if (o.fs != FsChoice::None) {
         Out(std::string("Reformatting as ") + (o.fs == FsChoice::ExFat ? "exFAT" : "NTFS") + "...\r\n");
         ReformatResult r = Reformat(disk.index, o.fs);
         Out(r.success ? "Reformat succeeded.\r\n" : "Reformat FAILED:\r\n" + r.output + "\r\n");
         if (!r.success) return WRITEERR;
     }
+    if (outcome == Outcome::Cancelled) return CANCELLED;
     return OK;
 }
 

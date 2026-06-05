@@ -15,13 +15,15 @@ enum {
 };
 const UINT WM_APP_PROGRESS = WM_APP + 1;
 const UINT WM_APP_DONE = WM_APP + 2;
+const UINT WM_APP_REFORMAT = WM_APP + 3;
 
 int g_dpi = 96;
 int S(int dip) { return MulDiv(dip, g_dpi, 96); }   // DIP -> px
 
 HFONT g_font = nullptr;
+HFONT g_mono = nullptr;
 HWND hMain, hHeader, hGrid, hRefresh, hModeBox, hFull, hQuick, hFmtBox, hFormat,
-     hWipe, hCancel, hProgress, hStatus, hLimits;
+     hWipe, hCancel, hProgress, hStatus, hSpeed, hLimits;
 
 std::vector<DiskInfo> g_disks;
 std::vector<GuardResult> g_guards;
@@ -105,6 +107,7 @@ void SetBusy(bool busy) {
     EnableWindow(hFormat, !busy);
     EnableWindow(hCancel, busy);
     EnableWindow(hWipe, FALSE);
+    SetWindowTextW(hSpeed, busy ? L"Measuring..." : L"");
     if (!busy) { SendMessageW(hProgress, PBM_SETPOS, 0, 0); UpdateWipeButton(); }
 }
 
@@ -145,7 +148,10 @@ bool ShowConfirm(HWND parent, const DiskInfo& d, Mode mode, FsChoice fs) {
         "   Bus:    " + BusName(d.busType) + "    Drives: " + d.lettersDisplay() + "\r\n"
         "   Serial: " + (d.serial.empty() ? "-" : d.serial) + "\r\n\r\n"
         "   Mode:   " + (mode == Mode::Full ? "Full" : "Quick") + "\r\n"
-        "   Then:   " + then + "\r\n\r\nThis cannot be undone.";
+        "   Then:   " + then + "\r\n"
+        + (d.letters.empty() ? "" :
+           "\r\nMounted volumes (" + d.lettersDisplay() + ") will be dismounted automatically.\r\n")
+        + "\r\nThis cannot be undone.";
 
     ConfirmState st; st.details = WideOf(txt);
 
@@ -191,8 +197,11 @@ DWORD WINAPI WorkerProc(LPVOID) {
         PostMessageW(hMain, WM_APP_PROGRESS, 0, 0);
     };
     job->outcome = RunWipe(job->disk, job->mode, cb, job->cancel, -1, job->err);
-    if (job->err.empty() && job->outcome != Outcome::Cancelled && job->fs != FsChoice::None) {
+    // Reformat even after a cancel: by the time you can cancel, the partition table
+    // is already gone, so still give back the formatted drive that was requested.
+    if (job->err.empty() && job->fs != FsChoice::None) {
         job->reformatTried = true;
+        PostMessageW(hMain, WM_APP_REFORMAT, 0, 0); // tell the UI we've moved on to formatting
         job->reformat = Reformat(job->disk.index, job->fs);
     }
     PostMessageW(hMain, WM_APP_DONE, 0, 0);
@@ -232,15 +241,18 @@ void OnDone() {
     if (!job->err.empty()) {
         status = "Failed.";
         MessageBoxW(hMain, WideOf(job->err).c_str(), L"Wipe failed", MB_OK | MB_ICONERROR);
-    } else if (job->outcome == Outcome::Cancelled) {
-        status = "Wipe cancelled.";
-    } else if (job->reformatTried && !job->reformat.success) {
-        status = "Wiped, but reformat failed.";
-        MessageBoxW(hMain, WideOf(job->reformat.output).c_str(), L"Reformat failed", MB_OK | MB_ICONWARNING);
-    } else if (job->fs != FsChoice::None) {
-        status = std::string("Done - wiped and formatted as ") + (job->fs == FsChoice::ExFat ? "exFAT" : "NTFS") + ".";
     } else {
-        status = std::string("Wipe ") + (job->outcome == Outcome::TimedOut ? "stopped (time box)" : "completed") + ".";
+        std::string base =
+            job->outcome == Outcome::Cancelled ? "Wipe cancelled" :
+            job->outcome == Outcome::TimedOut  ? "Wipe stopped (time box)" : "Wipe completed";
+        if (job->reformatTried && !job->reformat.success) {
+            status = base + ", but reformat failed.";
+            MessageBoxW(hMain, WideOf(job->reformat.output).c_str(), L"Reformat failed", MB_OK | MB_ICONWARNING);
+        } else if (job->reformatTried) {
+            status = base + "; formatted as " + (job->fs == FsChoice::ExFat ? "exFAT" : "NTFS") + ".";
+        } else {
+            status = base + ".";
+        }
     }
     if (job->thread) { WaitForSingleObject(job->thread, INFINITE); CloseHandle(job->thread); }
     delete job; g_job = nullptr;
@@ -254,14 +266,14 @@ void OnDone() {
 void Layout(int cw, int ch) {
     int m = S(16), gap = S(16);
     int x = m, y = m, w = cw - 2 * m;
-    int btnH = S(34), boxH = S(96), barH = S(26), lblH = S(40);
+    int btnH = S(34), boxH = S(96), barH = S(26), lblH = S(40), speedH = S(58);
 
     int refreshW = S(96);
     MoveWindow(hHeader, x, y, w - refreshW - gap, S(40), TRUE);
     MoveWindow(hRefresh, x + w - refreshW, y, refreshW, btnH, TRUE);
     y += S(48);
 
-    int gridBottom = ch - m - lblH - gap - barH - gap - S(24) - gap - btnH - gap - boxH - gap;
+    int gridBottom = ch - m - lblH - gap - speedH - gap - S(24) - gap - barH - gap - btnH - gap - boxH - gap;
     int gridH = gridBottom - y;
     if (gridH < S(120)) gridH = S(120);
     MoveWindow(hGrid, x, y, w, gridH, TRUE);
@@ -283,6 +295,8 @@ void Layout(int cw, int ch) {
     y += barH + gap;
     MoveWindow(hStatus, x, y, w, S(24), TRUE);
     y += S(24) + gap;
+    MoveWindow(hSpeed, x, y, w, speedH, TRUE);
+    y += speedH + gap;
     MoveWindow(hLimits, x, y, w, lblH, TRUE);
 }
 
@@ -328,6 +342,7 @@ LRESULT CALLBACK MainProc(HWND h, UINT m, WPARAM w, LPARAM l) {
             hProgress = CreateWindowExW(0, PROGRESS_CLASSW, L"", WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, h, (HMENU)ID_PROGRESS, hi, nullptr);
             SendMessageW(hProgress, PBM_SETRANGE32, 0, 1000);
             hStatus = CreateWindowExW(0, L"STATIC", L"Ready.", WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, h, (HMENU)ID_STATUS, hi, nullptr);
+            hSpeed = CreateWindowExW(0, L"STATIC", L"", WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, h, nullptr, hi, nullptr);
             hLimits = CreateWindowExW(0, L"STATIC",
                 L"Note: this destroys the filesystem and defeats software file-recovery tools. It cannot "
                 L"guarantee against lab-grade chip-off forensics; flash wear-leveling keeps remapped copies "
@@ -357,6 +372,7 @@ LRESULT CALLBACK MainProc(HWND h, UINT m, WPARAM w, LPARAM l) {
                 L"to completion for the same result as Full.");
 
             SetFontAll(h);
+            if (g_mono) SendMessageW(hSpeed, WM_SETFONT, (WPARAM)g_mono, TRUE); // align the speed columns
             RefreshList();
             return 0;
         }
@@ -370,7 +386,13 @@ LRESULT CALLBACK MainProc(HWND h, UINT m, WPARAM w, LPARAM l) {
             switch (LOWORD(w)) {
                 case ID_REFRESH: RefreshList(); return 0;
                 case ID_WIPE: StartWipe(); return 0;
-                case ID_CANCEL: if (g_job) g_job->cancel.store(true); return 0;
+                case ID_CANCEL:
+                    if (g_job && !g_job->cancel.load()) {
+                        g_job->cancel.store(true);
+                        EnableWindow(hCancel, FALSE);
+                        SetWindowTextW(hStatus, L"Cancelling - finishing the current block...");
+                    }
+                    return 0;
             }
             return 0;
         case WM_NOTIFY: {
@@ -401,13 +423,30 @@ LRESULT CALLBACK MainProc(HWND h, UINT m, WPARAM w, LPARAM l) {
             return 0;
         }
         case WM_APP_PROGRESS: {
+            if (g_job && g_job->cancel.load()) return 0; // keep the "Cancelling..." message
             EnterCriticalSection(&g_cs); Progress p = g_latest; LeaveCriticalSection(&g_cs);
             SendMessageW(hProgress, PBM_SETPOS, (WPARAM)(p.fraction() * 1000), 0);
             int es = (int)(p.etaSeconds + 0.5);
-            wchar_t b[200];
-            std::swprintf(b, 200, L"%s: %.1f%%  -  %.1f MB/s, ETA %02d:%02d:%02d",
-                WideOf(p.pass).c_str(), p.fraction() * 100.0, p.mbPerSec, es / 3600, (es / 60) % 60, es % 60);
+            wchar_t b[160];
+            std::swprintf(b, 160, L"%s - %.1f%%   ETA %02d:%02d:%02d",
+                WideOf(p.pass).c_str(), p.fraction() * 100.0, es / 3600, (es / 60) % 60, es % 60);
             SetWindowTextW(hStatus, b);
+            wchar_t s[320];
+            std::swprintf(s, 320,
+                L"Current   %7.1f MB/s\n"
+                L"Average   10s %7.1f   1 min %7.1f   total %7.1f MB/s\n"
+                L"Min %7.1f   Max %7.1f MB/s",
+                p.curMbPerSec, p.avg10sMbPerSec, p.avg60sMbPerSec, p.avgMbPerSec, p.minMbPerSec, p.maxMbPerSec);
+            SetWindowTextW(hSpeed, s);
+            return 0;
+        }
+        case WM_APP_REFORMAT: {
+            EnableWindow(hCancel, FALSE); // a format can't be cancelled
+            const wchar_t* fsName = (g_job && g_job->fs == FsChoice::ExFat) ? L"exFAT" : L"NTFS";
+            std::wstring m = (g_job && g_job->outcome == Outcome::Cancelled)
+                ? std::wstring(L"Wipe cancelled - reformatting as ") + fsName + L"..."
+                : std::wstring(L"Reformatting as ") + fsName + L"...";
+            SetWindowTextW(hStatus, m.c_str());
             return 0;
         }
         case WM_APP_DONE: OnDone(); return 0;
@@ -428,6 +467,9 @@ int RunGui(HINSTANCE hInst) {
     g_font = CreateFontW(-MulDiv(9, g_dpi, 72), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
         DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
         DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+    g_mono = CreateFontW(-MulDiv(9, g_dpi, 72), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+        FIXED_PITCH | FF_MODERN, L"Consolas");
 
     WNDCLASSW wc{};
     wc.lpfnWndProc = MainProc;
@@ -438,7 +480,7 @@ int RunGui(HINSTANCE hInst) {
     RegisterClassW(&wc);
 
     hMain = CreateWindowExW(0, L"QuickWiperMain", L"QuickWiper",
-        WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, S(920), S(640),
+        WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, S(920), S(720),
         nullptr, nullptr, hInst, nullptr);
     ShowWindow(hMain, SW_SHOW);
     UpdateWindow(hMain);
