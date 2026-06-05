@@ -256,25 +256,51 @@ void RandomSource::fill(unsigned char* buf, size_t len) {
 // ---- pass planner ---------------------------------------------------------
 
 std::vector<WriteOp> Plan(long long total, Mode mode) {
-    const long long NukeSize = 64LL * 1024 * 1024;
-    const long long HeaderStride = 16LL * 1024 * 1024;
-    const long long HeaderBlock = 256LL * 1024;
-    const char* PassNuke = "Nuke filesystem map";
-    const char* PassHeader = "Header kill";
+    const char* PassMap  = "Kill partition map";
+    const char* PassFill = "Spread fill";
     const char* PassFull = "Content fill";
 
     std::vector<WriteOp> ops;
     if (total <= 0) return ops;
 
-    if (mode == Mode::Quick) {
-        long long headLen = total < NukeSize ? total : NukeSize;
-        ops.push_back({ PassNuke, 0, headLen });
-        long long tailStart = (total - NukeSize) > headLen ? (total - NukeSize) : headLen;
-        if (tailStart < total) ops.push_back({ PassNuke, tailStart, total - tailStart });
-        for (long long off = headLen; off + HeaderBlock <= tailStart; off += HeaderStride)
-            ops.push_back({ PassHeader, off, HeaderBlock });
+    // Full: one thorough sequential overwrite, first sector to last.
+    if (mode != Mode::Quick) {
+        ops.push_back({ PassFull, 0, total });
+        return ops;
     }
-    ops.push_back({ PassFull, 0, total }); // present in both modes, last => Quick converges to Full
+
+    // Quick is an *anytime* wipe: at every instant of cancel, maximize the data
+    // already made unrecoverable. Two mechanisms, in strict value order.
+
+    // 1) Map kill (highest value, instant): destroy the structures that index
+    //    everything. The partition table + first partition's metadata live at the
+    //    front; the *backup* GPT lives at the very end and can rebuild the whole
+    //    partition map - and the spread fill below reaches the last chunk last, so
+    //    the tail must be killed explicitly up front.
+    const long long MapFront = 16LL * 1024 * 1024;
+    const long long MapTail  = 4LL * 1024 * 1024;
+    long long front = total < MapFront ? total : MapFront;
+    ops.push_back({ PassMap, 0, front });
+    if (total > front + MapTail)
+        ops.push_back({ PassMap, total - MapTail, MapTail });
+
+    // 2) Spread fill: overwrite the whole device in chunks, visited in bit-reversed
+    //    order. That keeps the finished chunks spread uniformly across the device at
+    //    every cancel point (no front/tail blind spot), while each chunk is one
+    //    large sequential write (fast on USB). When every chunk is written the
+    //    device is fully overwritten - i.e. Quick converges to the same result as
+    //    Full, just ordered to pay off earliest.
+    const long long ChunkSize = 64LL * 1024 * 1024; // big sequential bursts; one seek per chunk
+    long long nChunks = (total + ChunkSize - 1) / ChunkSize;
+    int bits = 0; while ((1LL << bits) < nChunks) bits++;
+    for (long long i = 0; i < (1LL << bits); ++i) {
+        long long j = 0;                                  // bit-reverse the low `bits` bits of i
+        for (int b = 0; b < bits; ++b) if (i & (1LL << b)) j |= (1LL << (bits - 1 - b));
+        if (j >= nChunks) continue;
+        long long off = j * ChunkSize;
+        long long len = (off + ChunkSize <= total) ? ChunkSize : (total - off);
+        ops.push_back({ PassFill, off, len });
+    }
     return ops;
 }
 
@@ -325,9 +351,16 @@ static HANDLE OpenForWrite(const DiskInfo& disk, std::vector<HANDLE>& locks, std
     DismountVolumesOnDisk(disk.index, locks);
 
     wchar_t path[64]; std::swprintf(path, 64, L"\\\\.\\PhysicalDrive%d", disk.index);
+    // Buffered writes (no FILE_FLAG_WRITE_THROUGH): let the cache manager pipeline
+    // and coalesce writes instead of forcing each one synchronously onto the media.
+    // This is a large win for the Header-kill pass - its small, scattered writes are
+    // murder on USB flash when each must commit (read-modify-write of an erase block)
+    // before the next can start. Correctness is preserved by an explicit periodic
+    // FlushFileBuffers (every FlushEvery bytes) and a final flush before close, so
+    // all data is on the device before we report success.
     HANDLE h = CreateFileW(path, GENERIC_READ | GENERIC_WRITE,
                            FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING,
-                           FILE_FLAG_WRITE_THROUGH, nullptr);
+                           0, nullptr);
     if (h == INVALID_HANDLE_VALUE) { err = "Could not open the physical drive for writing."; return INVALID_HANDLE_VALUE; }
 
     // Clear the partition table (the native equivalent of `diskpart clean`). This
@@ -387,6 +420,8 @@ Outcome RunWipe(const DiskInfo& disk, Mode mode, const ProgressFn& progress,
     auto plan = Plan(disk.sizeBytes, mode);
     long long totalPlanned = 0; for (auto& op : plan) totalPlanned += op.length;
     long long writtenTotal = 0;
+    long long sinceFlush = 0;
+    const long long FlushEvery = 64LL * 1024 * 1024; // bound how far progress can run ahead of the media
     SpeedStats speed;
 
     Outcome result = Outcome::Completed;
@@ -409,7 +444,8 @@ Outcome RunWipe(const DiskInfo& disk, Mode mode, const ProgressFn& progress,
                 err = "Write failed (device removed or write-protected?)."; result = Outcome::Cancelled; goto done;
             }
 
-            pos += count; writtenTotal += count;
+            pos += count; writtenTotal += count; sinceFlush += count;
+            if (sinceFlush >= FlushEvery) { FlushFileBuffers(h); sinceFlush = 0; }
             if (progress) {
                 double now = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
                 speed.add(now, writtenTotal);
@@ -426,7 +462,6 @@ Outcome RunWipe(const DiskInfo& disk, Mode mode, const ProgressFn& progress,
                 progress(p);
             }
         }
-        FlushFileBuffers(h);
     }
 done:
     FlushFileBuffers(h);
