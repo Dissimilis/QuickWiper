@@ -22,7 +22,7 @@ void Err(const std::string& s) { W(GetStdHandle(STD_ERROR_HANDLE), "ERROR: " + s
 
 struct Options {
     int disk = -1;
-    Mode mode = Mode::Quick;
+    Mode mode = Mode::Quick2;
     long long seconds = -1;
     bool yes = false;
     bool allowVirtual = false;
@@ -42,7 +42,7 @@ int Usage() {
 "Usage:\r\n"
 "  QuickWiper                                  Launch the GUI.\r\n"
 "  QuickWiper list [--allow-virtual]           List disks and whether each may be wiped.\r\n"
-"  QuickWiper wipe --disk N --mode full|quick [--seconds S] [--fs exfat|ntfs] --yes [--allow-virtual]\r\n"
+"  QuickWiper wipe --disk N --mode full|quick|quick2 [--seconds S] [--fs exfat|ntfs] --yes [--allow-virtual]\r\n"
 "  QuickWiper format --disk N --fs exfat|ntfs --yes [--allow-virtual]\r\n\r\n"
 "Safety:\r\n"
 "  The system/boot/pagefile disk can NEVER be wiped. Only USB-attached disks are wipeable;\r\n"
@@ -65,7 +65,7 @@ bool ParseOptions(int argc, char** argv, int start, Options& o) {
         const char* a = argv[i];
         auto next = [&]() -> const char* { return i + 1 < argc ? argv[++i] : nullptr; };
         if (!_stricmp(a, "--disk")) { const char* v = next(); if (!v) return false; o.disk = atoi(v); }
-        else if (!_stricmp(a, "--mode")) { const char* v = next(); if (!v) return false; o.mode = !_stricmp(v, "full") ? Mode::Full : Mode::Quick; }
+        else if (!_stricmp(a, "--mode")) { const char* v = next(); if (!v) return false; o.mode = !_stricmp(v, "full") ? Mode::Full : !_stricmp(v, "quick2") ? Mode::Quick2 : Mode::Quick; }
         else if (!_stricmp(a, "--seconds")) { const char* v = next(); if (!v) return false; o.seconds = atoll(v); }
         else if (!_stricmp(a, "--yes")) o.yes = true;
         else if (!_stricmp(a, "--allow-virtual")) o.allowVirtual = true;
@@ -125,7 +125,7 @@ int CmdWipe(const Options& o) {
 
     Out("Target: disk " + std::to_string(disk.index) + "  " + disk.model + "  " + disk.sizeDisplay()
         + "  [" + BusName(disk.busType) + "]  drives: " + disk.lettersDisplay() + "\r\n");
-    Out(std::string("Mode:   ") + (o.mode == Mode::Full ? "Full" : "Quick")
+    Out(std::string("Mode:   ") + (o.mode == Mode::Full ? "Full" : o.mode == Mode::Quick2 ? "Quick 2" : "Quick")
         + (o.seconds >= 0 ? "  (time box: " + std::to_string(o.seconds) + "s)" : "") + "\r\n");
     Out("ALL DATA ON THIS DEVICE WILL BE DESTROYED.\r\n");
     if (!disk.letters.empty())

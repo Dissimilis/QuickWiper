@@ -255,6 +255,26 @@ void RandomSource::fill(unsigned char* buf, size_t len) {
 
 // ---- pass planner ---------------------------------------------------------
 
+// Append a bit-reversed spread fill of [0, total) in `chunk`-sized blocks. Visiting
+// the chunks in bit-reversed index order keeps the finished chunks spread uniformly
+// across the device at every cancel point (no front/tail blind spot, multi-resolution
+// coverage for free) while still converging to a full overwrite when every chunk is
+// written. Smaller `chunk` => finer holes => fewer carve-recoverable files at any given
+// cancel point, at the cost of more (scattered) writes.
+static void AppendSpreadFill(std::vector<WriteOp>& ops, const char* pass,
+                             long long total, long long chunk) {
+    long long nChunks = (total + chunk - 1) / chunk;
+    int bits = 0; while ((1LL << bits) < nChunks) bits++;
+    for (long long i = 0; i < (1LL << bits); ++i) {
+        long long j = 0;                                  // bit-reverse the low `bits` bits of i
+        for (int b = 0; b < bits; ++b) if (i & (1LL << b)) j |= (1LL << (bits - 1 - b));
+        if (j >= nChunks) continue;
+        long long off = j * chunk;
+        long long len = (off + chunk <= total) ? chunk : (total - off);
+        ops.push_back({ pass, off, len });
+    }
+}
+
 std::vector<WriteOp> Plan(long long total, Mode mode) {
     const char* PassMap  = "Kill partition map";
     const char* PassFill = "Spread fill";
@@ -264,13 +284,13 @@ std::vector<WriteOp> Plan(long long total, Mode mode) {
     if (total <= 0) return ops;
 
     // Full: one thorough sequential overwrite, first sector to last.
-    if (mode != Mode::Quick) {
+    if (mode == Mode::Full) {
         ops.push_back({ PassFull, 0, total });
         return ops;
     }
 
-    // Quick is an *anytime* wipe: at every instant of cancel, maximize the data
-    // already made unrecoverable. Two mechanisms, in strict value order.
+    // Quick / Quick2 are *anytime* wipes: at every instant of cancel, maximize the
+    // data already made unrecoverable. Two mechanisms, in strict value order.
 
     // 1) Map kill (highest value, instant): destroy the structures that index
     //    everything. The partition table + first partition's metadata live at the
@@ -284,23 +304,21 @@ std::vector<WriteOp> Plan(long long total, Mode mode) {
     if (total > front + MapTail)
         ops.push_back({ PassMap, total - MapTail, MapTail });
 
-    // 2) Spread fill: overwrite the whole device in chunks, visited in bit-reversed
-    //    order. That keeps the finished chunks spread uniformly across the device at
-    //    every cancel point (no front/tail blind spot), while each chunk is one
-    //    large sequential write (fast on USB). When every chunk is written the
-    //    device is fully overwritten - i.e. Quick converges to the same result as
-    //    Full, just ordered to pay off earliest.
-    const long long ChunkSize = 64LL * 1024 * 1024; // big sequential bursts; one seek per chunk
-    long long nChunks = (total + ChunkSize - 1) / ChunkSize;
-    int bits = 0; while ((1LL << bits) < nChunks) bits++;
-    for (long long i = 0; i < (1LL << bits); ++i) {
-        long long j = 0;                                  // bit-reverse the low `bits` bits of i
-        for (int b = 0; b < bits; ++b) if (i & (1LL << b)) j |= (1LL << (bits - 1 - b));
-        if (j >= nChunks) continue;
-        long long off = j * ChunkSize;
-        long long len = (off + ChunkSize <= total) ? ChunkSize : (total - off);
-        ops.push_back({ PassFill, off, len });
-    }
+    // 2) Bit-reversed spread fill. Quick uses large 64 MB chunks (one big sequential
+    //    write each, fastest on USB, but leaves whole 64 MB regions pristine until
+    //    visited). Quick2 uses a much smaller chunk: at any cancel point the holes are
+    //    spread at that fine spacing across the *whole* device, so almost no file stays
+    //    contiguously intact for a carver - dramatically more effective per byte written
+    //    early on - while still converging to the same full overwrite as Full/Quick.
+    // 64 MB for Quick (max throughput); 8 MB for Quick2. 8 MB is the smallest chunk
+    // that still writes at near-sequential speed on cheap USB flash: below it, writes
+    // fall under the flash erase-block size and collapse to ~1 MB/s (measured: 4 MB
+    // ran ~20x slower than 8 MB on a Lexar USB drive). At 8 MB the device is covered
+    // ~3x more finely than Quick per unit time (more blocks/second), so the largest
+    // contiguous intact region left at any cancel point is ~3x smaller.
+    const long long QuickChunk  = 64LL * 1024 * 1024;
+    const long long Quick2Chunk =  8LL * 1024 * 1024;
+    AppendSpreadFill(ops, PassFill, total, mode == Mode::Quick2 ? Quick2Chunk : QuickChunk);
     return ops;
 }
 

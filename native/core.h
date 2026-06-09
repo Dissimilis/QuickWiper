@@ -44,7 +44,7 @@ std::vector<DiskInfo> Enumerate();
 // Disk numbers that must never be wiped (Windows/system disk, pagefile disks).
 std::set<int> GetProtectedDiskNumbers();
 
-enum class Mode { Full, Quick };
+enum class Mode { Full, Quick, Quick2 };
 enum class Outcome { Completed, Cancelled, TimedOut };
 enum class FsChoice { None, ExFat, Ntfs };
 

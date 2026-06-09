@@ -124,12 +124,18 @@ try {
     Check "refuses without --yes" ($e3 -eq 1)
 
     # 4. time-box: --seconds 0 stops immediately (still exit 0).
-    $e4 = Exe "wipe VHD quick --seconds 0 (timebox)" @('wipe','--disk',"$idx",'--mode','quick','--seconds','0','--yes','--allow-virtual')
+    $e4 = Exe "wipe VHD quick2 --seconds 0 (timebox)" @('wipe','--disk',"$idx",'--mode','quick2','--seconds','0','--yes','--allow-virtual')
     Check "timebox returns success exit" ($e4 -eq 0)
 
-    # 5. real quick wipe of the VHD.
-    $e5 = Exe "wipe VHD quick (expect 0)" @('wipe','--disk',"$idx",'--mode','quick','--yes','--allow-virtual')
-    Check "quick wipe succeeded" ($e5 -eq 0)
+    # 5. real quick2 wipe of the VHD (fine-grained spread). This is the wipe whose
+    #    result the marker-absence check (step 8) verifies: a full quick2 run must
+    #    overwrite every byte, just like Full.
+    $e5 = Exe "wipe VHD quick2 (expect 0)" @('wipe','--disk',"$idx",'--mode','quick2','--yes','--allow-virtual')
+    Check "quick2 wipe succeeded" ($e5 -eq 0)
+
+    # 5b. quick mode wipe (exit-code coverage).
+    $e6 = Exe "wipe VHD quick (expect 0)" @('wipe','--disk',"$idx",'--mode','quick','--yes','--allow-virtual')
+    Check "quick wipe succeeded" ($e6 -eq 0)
 
     # 6. full mode wipe.
     $e7 = Exe "wipe VHD full (expect 0)" @('wipe','--disk',"$idx",'--mode','full','--yes','--allow-virtual')

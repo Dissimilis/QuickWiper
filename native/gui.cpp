@@ -11,7 +11,7 @@ using namespace qw;
 namespace {
 
 enum {
-    ID_GRID = 1001, ID_REFRESH, ID_FULL, ID_QUICK, ID_FORMAT, ID_WIPE, ID_CANCEL, ID_PROGRESS, ID_STATUS
+    ID_GRID = 1001, ID_REFRESH, ID_FULL, ID_QUICK, ID_QUICK2, ID_FORMAT, ID_WIPE, ID_CANCEL, ID_PROGRESS, ID_STATUS
 };
 const UINT WM_APP_PROGRESS = WM_APP + 1;
 const UINT WM_APP_DONE = WM_APP + 2;
@@ -22,7 +22,7 @@ int S(int dip) { return MulDiv(dip, g_dpi, 96); }   // DIP -> px
 
 HFONT g_font = nullptr;
 HFONT g_mono = nullptr;
-HWND hMain, hHeader, hGrid, hRefresh, hModeBox, hFull, hQuick, hFmtBox, hFormat,
+HWND hMain, hHeader, hGrid, hRefresh, hModeBox, hFull, hQuick, hQuick2, hFmtBox, hFormat,
      hWipe, hCancel, hProgress, hStatus, hSpeed, hLimits;
 
 std::vector<DiskInfo> g_disks;
@@ -61,8 +61,11 @@ FsChoice SelectedFs() {
     return i == 1 ? FsChoice::ExFat : i == 2 ? FsChoice::Ntfs : FsChoice::None;
 }
 Mode SelectedMode() {
-    return SendMessageW(hFull, BM_GETCHECK, 0, 0) == BST_CHECKED ? Mode::Full : Mode::Quick;
+    if (SendMessageW(hFull, BM_GETCHECK, 0, 0) == BST_CHECKED) return Mode::Full;
+    if (SendMessageW(hQuick2, BM_GETCHECK, 0, 0) == BST_CHECKED) return Mode::Quick2;
+    return Mode::Quick;
 }
+const char* ModeName(Mode m) { return m == Mode::Full ? "Full" : m == Mode::Quick2 ? "Quick 2" : "Quick"; }
 int SelectedRow() {
     return (int)SendMessageW(hGrid, LVM_GETNEXTITEM, (WPARAM)-1, LVNI_SELECTED);
 }
@@ -104,6 +107,7 @@ void SetBusy(bool busy) {
     EnableWindow(hRefresh, !busy);
     EnableWindow(hFull, !busy);
     EnableWindow(hQuick, !busy);
+    EnableWindow(hQuick2, !busy);
     EnableWindow(hFormat, !busy);
     EnableWindow(hCancel, busy);
     EnableWindow(hWipe, FALSE);
@@ -147,7 +151,7 @@ bool ShowConfirm(HWND parent, const DiskInfo& d, Mode mode, FsChoice fs) {
         "   Size:   " + d.sizeDisplay() + "\r\n"
         "   Bus:    " + BusName(d.busType) + "    Drives: " + d.lettersDisplay() + "\r\n"
         "   Serial: " + (d.serial.empty() ? "-" : d.serial) + "\r\n\r\n"
-        "   Mode:   " + (mode == Mode::Full ? "Full" : "Quick") + "\r\n"
+        "   Mode:   " + ModeName(mode) + "\r\n"
         "   Then:   " + then + "\r\n"
         + (d.letters.empty() ? "" :
            "\r\nMounted volumes (" + d.lettersDisplay() + ") will be dismounted automatically.\r\n")
@@ -266,7 +270,7 @@ void OnDone() {
 void Layout(int cw, int ch) {
     int m = S(16), gap = S(16);
     int x = m, y = m, w = cw - 2 * m;
-    int btnH = S(34), boxH = S(96), barH = S(26), lblH = S(40), speedH = S(58);
+    int btnH = S(34), boxH = S(128), barH = S(26), lblH = S(40), speedH = S(58);
 
     int refreshW = S(96);
     MoveWindow(hHeader, x, y, w - refreshW - gap, S(40), TRUE);
@@ -279,10 +283,11 @@ void Layout(int cw, int ch) {
     MoveWindow(hGrid, x, y, w, gridH, TRUE);
     y += gridH + gap;
 
-    int modeW = S(330), fmtW = S(260);
+    int modeW = S(420), fmtW = S(260);
     MoveWindow(hModeBox, x, y, modeW, boxH, TRUE);
-    MoveWindow(hFull, x + S(16), y + S(28), S(290), S(24), TRUE);
-    MoveWindow(hQuick, x + S(16), y + S(58), S(290), S(24), TRUE);
+    MoveWindow(hQuick2, x + S(16), y + S(28), S(388), S(24), TRUE);
+    MoveWindow(hQuick,  x + S(16), y + S(58), S(388), S(24), TRUE);
+    MoveWindow(hFull,   x + S(16), y + S(88), S(388), S(24), TRUE);
     MoveWindow(hFmtBox, x + modeW + gap, y, fmtW, boxH, TRUE);
     MoveWindow(hFormat, x + modeW + gap + S(16), y + S(34), S(200), S(200), TRUE);
     y += boxH + gap;
@@ -322,10 +327,12 @@ LRESULT CALLBACK MainProc(HWND h, UINT m, WPARAM w, LPARAM l) {
 
             hModeBox = CreateWindowExW(0, L"BUTTON", L"Mode", WS_CHILD | WS_VISIBLE | BS_GROUPBOX, 0, 0, 0, 0, h, nullptr, hi, nullptr);
             hFull = CreateWindowExW(0, L"BUTTON", L"Full (thorough overwrite)",
-                WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTORADIOBUTTON | WS_GROUP, 0, 0, 0, 0, h, (HMENU)ID_FULL, hi, nullptr);
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTORADIOBUTTON, 0, 0, 0, 0, h, (HMENU)ID_FULL, hi, nullptr);
+            hQuick2 = CreateWindowExW(0, L"BUTTON", L"Quick 2 (fine-grained, cancel anytime - recommended)",
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTORADIOBUTTON | WS_GROUP, 0, 0, 0, 0, h, (HMENU)ID_QUICK2, hi, nullptr);
             hQuick = CreateWindowExW(0, L"BUTTON", L"Quick (progressive, cancel anytime)",
                 WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTORADIOBUTTON, 0, 0, 0, 0, h, (HMENU)ID_QUICK, hi, nullptr);
-            SendMessageW(hQuick, BM_SETCHECK, BST_CHECKED, 0);
+            SendMessageW(hQuick2, BM_SETCHECK, BST_CHECKED, 0);
 
             hFmtBox = CreateWindowExW(0, L"BUTTON", L"After wipe, reformat as", WS_CHILD | WS_VISIBLE | BS_GROUPBOX, 0, 0, 0, 0, h, nullptr, hi, nullptr);
             hFormat = CreateWindowExW(0, L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | CBS_DROPDOWNLIST,
@@ -364,12 +371,19 @@ LRESULT CALLBACK MainProc(HWND h, UINT m, WPARAM w, LPARAM l) {
                 L"Full: writes random data over the entire device, from the first sector "
                 L"to the last. Most thorough; takes as long as it takes to write the whole "
                 L"device once.");
+            addTip(hQuick2,
+                L"Quick 2 (recommended): like Quick, but overwrites in much finer, evenly-spread "
+                L"blocks. It destroys the filesystem map first, then punches random-data holes "
+                L"uniformly across the whole device - so within seconds almost no file is left "
+                L"contiguously intact for a recovery tool to carve back, no matter where it sat. "
+                L"Cancel any time for a fast, highly-effective partial wipe, or let it run to "
+                L"completion for the same result as Full.");
             addTip(hQuick,
-                L"Quick: a progressive wipe you can cancel at any time. It works in order of "
-                L"impact - first it destroys the filesystem map (the index of what is where), "
-                L"then overwrites file headers across the whole device, then fills the rest with "
-                L"random data. Stop after a few seconds for a fast, partial wipe, or let it run "
-                L"to completion for the same result as Full.");
+                L"Quick: a progressive wipe you can cancel at any time. It destroys the filesystem "
+                L"map first, then overwrites the device in large 64 MB blocks spread across it. "
+                L"Fastest to complete, but until a block is reached its whole 64 MB stays intact. "
+                L"Quick 2 covers the device more finely; prefer it unless you are letting the wipe "
+                L"run all the way to completion.");
 
             SetFontAll(h);
             if (g_mono) SendMessageW(hSpeed, WM_SETFONT, (WPARAM)g_mono, TRUE); // align the speed columns
